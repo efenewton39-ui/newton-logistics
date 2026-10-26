@@ -1,4 +1,3 @@
-
 import os
 import secrets
 import string
@@ -201,19 +200,31 @@ def admin():
         if not all([recipient, origin, destination, location]) or status not in STATUSES:
             flash("Completa todos los campos obligatorios y selecciona un estado válido.")
         else:
+            photo_url = ""
+            photo_warning = ""
+            # Save the shipment even if the optional photo upload fails.
+            # The full exception goes to Render Logs; never expose credentials to visitors.
+            if photo and photo.filename:
+                try:
+                    photo_url = upload_photo(photo) or ""
+                except Exception as exc:
+                    app.logger.exception("Cloudinary photo upload failed while creating shipment")
+                    photo_warning = " El envío se guardó, pero la foto no se pudo subir. Revisa Cloudinary en Render Logs."
             try:
-                photo_url = upload_photo(photo) if photo and photo.filename else ""
                 with db() as conn:
                     conn.execute("""INSERT INTO shipments(code,recipient,origin,destination,status,location,details,updated_at,photo_url)
                         VALUES(?,?,?,?,?,?,?,?,?)""",
-                        (code, recipient, origin, destination, status, location, details, now(), photo_url or ""))
-                flash("Envío creado. Código de seguimiento: " + code)
+                        (code, recipient, origin, destination, status, location, details, now(), photo_url))
+                if photo_warning:
+                    flash("Envío creado sin foto. Código de seguimiento: " + code + "." + photo_warning)
+                else:
+                    flash("Envío creado. Código de seguimiento: " + code)
                 return redirect(url_for("admin"))
             except sqlite3.IntegrityError:
                 flash("Ese código de seguimiento ya existe. Elige otro.")
-            except (RuntimeError, ValueError, Exception) as exc:
-                app.logger.exception("Error creating shipment")
-                flash("No se pudo guardar el envío o subir la foto. Revisa las credenciales de Cloudinary y el formato de la imagen.")
+            except Exception:
+                app.logger.exception("Database error while creating shipment")
+                flash("No se pudo guardar el envío. Revisa el error de base de datos en Render Logs.")
     with db() as conn:
         shipments = conn.execute("SELECT * FROM shipments ORDER BY id DESC").fetchall()
     return page("Panel de administración", """
@@ -261,7 +272,7 @@ def edit(code):
                 return redirect(url_for("admin"))
             except Exception:
                 app.logger.exception("Error updating shipment")
-                flash("No se pudo actualizar. Revisa las credenciales de Cloudinary y el formato de la imagen.")
+                flash("No se pudo actualizar el envío. Revisa el error más reciente en Render Logs.")
     with db() as conn:
         shipment = conn.execute("SELECT * FROM shipments WHERE code=?", (code.upper(),)).fetchone()
     return page("Actualizar envío", """
