@@ -1,15 +1,40 @@
 
-import os, secrets, string, sqlite3
+import os
+import secrets
+import string
+import sqlite3
 from datetime import datetime, timezone
 from functools import wraps
-from flask import Flask, request, redirect, url_for, render_template_string, session, flash, abort
+
+import cloudinary
+import cloudinary.uploader
+from flask import (
+    Flask, request, redirect, url_for, render_template_string,
+    session, flash, abort
+)
 
 APP_SECRET = os.environ.get("APP_SECRET", "change-this-before-public-launch")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Bless@2008")
 DB_PATH = os.environ.get("DB_PATH", "shipments.db")
+CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
+CLOUDINARY_API_KEY = os.environ.get("CLOUDINARY_API_KEY", "")
+CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET", "")
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # max 8 MB upload
+
+def cloudinary_ready():
+    return all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET])
+
+def configure_cloudinary():
+    if cloudinary_ready():
+        cloudinary.config(
+            cloud_name=CLOUDINARY_CLOUD_NAME,
+            api_key=CLOUDINARY_API_KEY,
+            api_secret=CLOUDINARY_API_SECRET,
+            secure=True,
+        )
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -29,6 +54,10 @@ def init_db():
             details TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
         )""")
+        # Safe migration: preserve existing shipments and add the photo column if missing.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(shipments)").fetchall()}
+        if "photo_url" not in columns:
+            conn.execute("ALTER TABLE shipments ADD COLUMN photo_url TEXT NOT NULL DEFAULT ''")
 
 def now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -40,6 +69,24 @@ def admin_required(fn):
             return redirect(url_for("login"))
         return fn(*args, **kwargs)
     return wrapper
+
+def upload_photo(file_storage):
+    """Upload an optional image to Cloudinary and return its secure URL."""
+    if not file_storage or not file_storage.filename:
+        return None
+    if not cloudinary_ready():
+        raise RuntimeError("Faltan las credenciales de Cloudinary en Render.")
+    allowed = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+    if file_storage.mimetype not in allowed:
+        raise ValueError("Usa una imagen JPG, PNG, WEBP o GIF.")
+    configure_cloudinary()
+    result = cloudinary.uploader.upload(
+        file_storage,
+        folder="newton-logistics/parcels",
+        resource_type="image",
+        transformation=[{"width": 1600, "height": 1600, "crop": "limit"}],
+    )
+    return result.get("secure_url")
 
 STYLE = """
 :root{--navy:#10233f;--blue:#1d5eea;--pale:#f3f6fb;--ink:#172033;--muted:#68758a;--line:#e2e8f0}
@@ -58,15 +105,27 @@ textarea{min-height:90px}button,.btn{border:0;background:var(--blue);color:white
 table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:12px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted)}
 footer{text-align:center;color:var(--muted);padding:30px 15px;font-size:13px}
 a{color:#1d5eea}.actions{display:flex;gap:8px;flex-wrap:wrap}
+.parcel-photo{display:block;width:100%;max-width:560px;max-height:480px;object-fit:contain;border-radius:14px;border:1px solid var(--line);margin:18px auto;background:#f8fafc}
 @media(max-width:580px){form.search{flex-direction:column}.panel{padding:18px}header{padding:18px}nav a{margin-left:8px}}
 """
-
 BASE = """<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title }} | Newton Logistics</title><style>""" + STYLE + """</style></head><body>
 <header><div class="brand">NEWTON <span>LOGISTICS</span></div><nav><a href="{{ url_for('index') }}">Seguimiento</a>{% if session.get('admin') %}<a href="{{ url_for('admin') }}">Panel de administración</a><a href="{{ url_for('logout') }}">Cerrar sesión</a>{% else %}<a href="{{ url_for('login') }}">Administración</a>{% endif %}</nav></header>
 <main>{% with messages=get_flashed_messages() %}{% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}{{ content|safe }}</main><footer>Newton Logistics · La información de seguimiento refleja la última actualización registrada. Este sitio no está afiliado a otra empresa de mensajería, salvo que se indique expresamente.</footer></body></html>"""
 
 def page(title, content, **ctx):
     return render_template_string(BASE, title=title, content=render_template_string(content, **ctx), **ctx)
+
+STATUSES = ["Processing", "In Transit", "At Local Facility", "Out for Delivery", "Delivered", "On Hold"]
+
+def status_es(status):
+    return {
+        "Processing": "En preparación",
+        "In Transit": "En tránsito",
+        "At Local Facility": "En el centro de distribución local",
+        "Out for Delivery": "En camino para la entrega",
+        "Delivered": "Entregado",
+        "On Hold": "En espera",
+    }.get(status, status)
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -78,44 +137,28 @@ def index():
         code = request.form.get("code", "").strip().upper()
         with db() as conn:
             shipment = conn.execute("SELECT * FROM shipments WHERE code=?", (code,)).fetchone()
-
     content = """
 <section class="hero">
 <h1>Consulta el estado de tu envío</h1>
 <p>Introduce tu código de seguimiento para consultar el último estado y la ubicación registrada de tu envío.</p>
 <form class="search" method="post">
 <input name="code" placeholder="Ej.: NWT-AB12CD34" value="{{ code }}" required aria-label="Código de seguimiento">
-<button>Consultar envío</button>
-</form>
-</section>
-
-{% if searched %}
-<div class="panel">
-{% if shipment %}
-<div class="muted">NÚMERO DE SEGUIMIENTO</div>
-<div class="tracking-code">{{ shipment.code }}</div>
-<p><span class="pill">{% if shipment.status == "Processing" %}En preparación{% elif shipment.status == "In Transit" %}En tránsito{% elif shipment.status == "At Local Facility" %}En el centro de distribución local{% elif shipment.status == "Out for Delivery" %}En camino para la entrega{% elif shipment.status == "Delivered" %}Entregado{% elif shipment.status == "On Hold" %}En espera{% else %}{{ shipment.status }}{% endif %}</span></p>
+<button>Consultar envío</button></form></section>
+{% if searched %}<div class="panel">{% if shipment %}
+<div class="muted">NÚMERO DE SEGUIMIENTO</div><div class="tracking-code">{{ shipment.code }}</div>
+<p><span class="pill">{{ status_es(shipment.status) }}</span></p>
+{% if shipment.photo_url %}<h2>Foto del paquete</h2><img class="parcel-photo" src="{{ shipment.photo_url }}" alt="Foto del paquete">{% endif %}
 <div class="grid">
 <div><div class="muted">ÚLTIMA UBICACIÓN REGISTRADA</div><strong>{{ shipment.location }}</strong></div>
 <div><div class="muted">DESTINO</div><strong>{{ shipment.destination }}</strong></div>
 <div><div class="muted">ORIGEN</div><strong>{{ shipment.origin }}</strong></div>
-<div><div class="muted">ÚLTIMA ACTUALIZACIÓN</div><strong>{{ shipment.updated_at }}</strong></div>
-</div>
+<div><div class="muted">ÚLTIMA ACTUALIZACIÓN</div><strong>{{ shipment.updated_at }}</strong></div></div>
 {% if shipment.details %}<p>{{ shipment.details }}</p>{% endif %}
 <p class="muted">Esta información refleja la última actualización registrada. No se trata de un seguimiento GPS en tiempo real.</p>
-{% else %}
-<h2>No se encontró el código de seguimiento</h2>
-<p>Comprueba el código e inténtalo de nuevo o ponte en contacto con la persona que te envió el paquete.</p>
-{% endif %}
-</div>
-{% endif %}
-
-<div class="panel">
-<h2>¿Cómo funciona el seguimiento?</h2>
-<p class="muted">Cada código válido corresponde a un registro de envío. El estado y la ubicación se muestran aquí cuando se registra una actualización.</p>
-</div>
+{% else %}<h2>No se encontró el código de seguimiento</h2><p>Comprueba el código e inténtalo de nuevo o ponte en contacto con la persona que te envió el paquete.</p>{% endif %}</div>{% endif %}
+<div class="panel"><h2>¿Cómo funciona el seguimiento?</h2><p class="muted">Cada código válido corresponde a un registro de envío. El estado y la ubicación se muestran aquí cuando se registra una actualización.</p></div>
 """
-    return page("Seguimiento de envíos", content, shipment=shipment, searched=searched, code=code)
+    return page("Seguimiento de envíos", content, shipment=shipment, searched=searched, code=code, status_es=status_es)
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -154,40 +197,41 @@ def admin():
         location = request.form.get("location", "").strip()
         details = request.form.get("details", "").strip()
         code = request.form.get("code", "").strip().upper() or new_code()
-        allowed = ["Processing", "In Transit", "At Local Facility", "Out for Delivery", "Delivered", "On Hold"]
-        if not all([recipient, origin, destination, location]) or status not in allowed:
+        photo = request.files.get("photo")
+        if not all([recipient, origin, destination, location]) or status not in STATUSES:
             flash("Completa todos los campos obligatorios y selecciona un estado válido.")
         else:
             try:
+                photo_url = upload_photo(photo) if photo and photo.filename else ""
                 with db() as conn:
-                    conn.execute("INSERT INTO shipments(code,recipient,origin,destination,status,location,details,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                        (code, recipient, origin, destination, status, location, details, now()))
+                    conn.execute("""INSERT INTO shipments(code,recipient,origin,destination,status,location,details,updated_at,photo_url)
+                        VALUES(?,?,?,?,?,?,?,?,?)""",
+                        (code, recipient, origin, destination, status, location, details, now(), photo_url or ""))
                 flash("Envío creado. Código de seguimiento: " + code)
                 return redirect(url_for("admin"))
             except sqlite3.IntegrityError:
                 flash("Ese código de seguimiento ya existe. Elige otro.")
-
+            except (RuntimeError, ValueError, Exception) as exc:
+                app.logger.exception("Error creating shipment")
+                flash("No se pudo guardar el envío o subir la foto. Revisa las credenciales de Cloudinary y el formato de la imagen.")
     with db() as conn:
         shipments = conn.execute("SELECT * FROM shipments ORDER BY id DESC").fetchall()
-
     return page("Panel de administración", """
-<div class="panel"><h1 style="font-size:30px">Panel de envíos</h1><p class="muted">Crea un registro de envío y comparte su código de seguimiento con el cliente.</p>
-<form method="post">
-<div class="grid">
+<div class="panel"><h1 style="font-size:30px">Panel de envíos</h1><p class="muted">Crea un envío, añade una foto del paquete y comparte el código con el cliente.</p>
+<form method="post" enctype="multipart/form-data"><div class="grid">
 <div class="field"><label>Destinatario / referencia *</label><input name="recipient" required></div>
 <div class="field"><label>Código de seguimiento (opcional)</label><input name="code" placeholder="Déjalo vacío para generar uno"></div>
 <div class="field"><label>Origen *</label><input name="origin" placeholder="Ciudad o lugar de despacho" required></div>
 <div class="field"><label>Destino *</label><input name="destination" placeholder="Ciudad o centro de destino" required></div>
-<div class="field"><label>Última ubicación confirmada *</label><input name="location" placeholder="Último lugar donde se confirmó el paquete" required></div>
-<div class="field"><label>Estado *</label><select name="status">{% for s in statuses %}<option value="{{ s }}">{% if s == "Processing" %}En preparación{% elif s == "In Transit" %}En tránsito{% elif s == "At Local Facility" %}En el centro de distribución local{% elif s == "Out for Delivery" %}En camino para la entrega{% elif s == "Delivered" %}Entregado{% elif s == "On Hold" %}En espera{% else %}{{ s }}{% endif %}</option>{% endfor %}</select></div>
-</div>
-<div class="field"><label>Actualización del envío / notas</label><textarea name="details" placeholder="Nota opcional basada en información confirmada"></textarea></div><button>Crear envío</button>
-</form></div>
+<div class="field"><label>Última ubicación confirmada *</label><input name="location" placeholder="Último lugar confirmado" required></div>
+<div class="field"><label>Estado *</label><select name="status">{% for s in statuses %}<option value="{{ s }}">{{ status_es(s) }}</option>{% endfor %}</select></div>
+</div><div class="field"><label>Foto del paquete (opcional)</label><input type="file" name="photo" accept="image/jpeg,image/png,image/webp,image/gif"><small class="muted">JPG, PNG, WEBP o GIF; máximo 8 MB.</small></div>
+<div class="field"><label>Actualización del envío / notas</label><textarea name="details" placeholder="Nota opcional basada en información confirmada"></textarea></div><button>Crear envío</button></form></div>
 <div class="panel"><h2>Envíos guardados ({{ shipments|length }})</h2>
-{% if shipments %}<div style="overflow-x:auto"><table><thead><tr><th>Código</th><th>Destino</th><th>Estado</th><th>Ubicación</th><th>Actualizado</th><th></th></tr></thead><tbody>
-{% for s in shipments %}<tr><td><strong>{{ s.code }}</strong></td><td>{{ s.destination }}</td><td>{% if s.status == "Processing" %}En preparación{% elif s.status == "In Transit" %}En tránsito{% elif s.status == "At Local Facility" %}En el centro de distribución local{% elif s.status == "Out for Delivery" %}En camino para la entrega{% elif s.status == "Delivered" %}Entregado{% elif s.status == "On Hold" %}En espera{% else %}{{ s.status }}{% endif %}</td><td>{{ s.location }}</td><td>{{ s.updated_at }}</td><td><a href="{{ url_for('edit', code=s.code) }}">Editar</a></td></tr>{% endfor %}
+{% if shipments %}<div style="overflow-x:auto"><table><thead><tr><th>Código</th><th>Destino</th><th>Estado</th><th>Foto</th><th>Ubicación</th><th>Actualizado</th><th></th></tr></thead><tbody>
+{% for s in shipments %}<tr><td><strong>{{ s.code }}</strong></td><td>{{ s.destination }}</td><td>{{ status_es(s.status) }}</td><td>{% if s.photo_url %}Sí{% else %}No{% endif %}</td><td>{{ s.location }}</td><td>{{ s.updated_at }}</td><td><a href="{{ url_for('edit', code=s.code) }}">Editar</a></td></tr>{% endfor %}
 </tbody></table></div>{% else %}<p class="muted">Todavía no hay envíos. Crea el primero arriba.</p>{% endif %}</div>
-""", shipments=shipments, statuses=["Processing","In Transit","At Local Facility","Out for Delivery","Delivered","On Hold"])
+""", shipments=shipments, statuses=STATUSES, status_es=status_es)
 
 @app.route("/admin/edit/<code>", methods=["GET", "POST"])
 @admin_required
@@ -196,29 +240,44 @@ def edit(code):
         shipment = conn.execute("SELECT * FROM shipments WHERE code=?", (code.upper(),)).fetchone()
     if not shipment:
         abort(404)
-
-    statuses = ["Processing","In Transit","At Local Facility","Out for Delivery","Delivered","On Hold"]
-
     if request.method == "POST":
         status = request.form.get("status", "Processing")
         location = request.form.get("location", "").strip()
         details = request.form.get("details", "").strip()
-        if status not in statuses or not location:
+        photo = request.files.get("photo")
+        if status not in STATUSES or not location:
             flash("Introduce una ubicación y selecciona un estado válido.")
         else:
-            with db() as conn:
-                conn.execute("UPDATE shipments SET status=?,location=?,details=?,updated_at=? WHERE code=?",
-                             (status, location, details, now(), code.upper()))
-            flash("Envío actualizado.")
-            return redirect(url_for("admin"))
-
+            try:
+                new_photo_url = upload_photo(photo) if photo and photo.filename else None
+                with db() as conn:
+                    if new_photo_url:
+                        conn.execute("UPDATE shipments SET status=?,location=?,details=?,updated_at=?,photo_url=? WHERE code=?",
+                                     (status, location, details, now(), new_photo_url, code.upper()))
+                    else:
+                        conn.execute("UPDATE shipments SET status=?,location=?,details=?,updated_at=? WHERE code=?",
+                                     (status, location, details, now(), code.upper()))
+                flash("Envío actualizado.")
+                return redirect(url_for("admin"))
+            except Exception:
+                app.logger.exception("Error updating shipment")
+                flash("No se pudo actualizar. Revisa las credenciales de Cloudinary y el formato de la imagen.")
+    with db() as conn:
+        shipment = conn.execute("SELECT * FROM shipments WHERE code=?", (code.upper(),)).fetchone()
     return page("Actualizar envío", """
 <div class="panel"><h1 style="font-size:28px">Actualizar {{ shipment.code }}</h1><p>Destino: <strong>{{ shipment.destination }}</strong></p>
-<form method="post"><div class="field"><label>Estado</label><select name="status">{% for s in statuses %}<option value="{{ s }}" {% if s==shipment.status %}selected{% endif %}>{% if s == "Processing" %}En preparación{% elif s == "In Transit" %}En tránsito{% elif s == "At Local Facility" %}En el centro de distribución local{% elif s == "Out for Delivery" %}En camino para la entrega{% elif s == "Delivered" %}Entregado{% elif s == "On Hold" %}En espera{% else %}{{ s }}{% endif %}</option>{% endfor %}</select></div>
+{% if shipment.photo_url %}<p class="muted">Foto actual:</p><img class="parcel-photo" src="{{ shipment.photo_url }}" alt="Foto actual del paquete">{% endif %}
+<form method="post" enctype="multipart/form-data"><div class="field"><label>Estado</label><select name="status">{% for s in statuses %}<option value="{{ s }}" {% if s==shipment.status %}selected{% endif %}>{{ status_es(s) }}</option>{% endfor %}</select></div>
 <div class="field"><label>Última ubicación confirmada</label><input name="location" value="{{ shipment.location }}" required></div>
-<div class="field"><label>Notas de actualización</label><textarea name="details">{{ shipment.details }}</textarea></div><div class="actions"><button>Guardar actualización</button><a class="btn" style="background:#64748b" href="{{ url_for('admin') }}">Cancelar</a></div></form>
+<div class="field"><label>Notas de actualización</label><textarea name="details">{{ shipment.details }}</textarea></div>
+<div class="field"><label>Subir/reemplazar foto del paquete (opcional)</label><input type="file" name="photo" accept="image/jpeg,image/png,image/webp,image/gif"><small class="muted">Si no seleccionas una foto nueva, la foto actual se conserva.</small></div>
+<div class="actions"><button>Guardar actualización</button><a class="btn" style="background:#64748b" href="{{ url_for('admin') }}">Cancelar</a></div></form>
 <p class="muted">Introduce únicamente una ubicación y un estado respaldados por información real del envío.</p></div>
-""", shipment=shipment, statuses=statuses)
+""", shipment=shipment, statuses=STATUSES, status_es=status_es)
+
+@app.errorhandler(413)
+def too_large(_error):
+    return "La imagen supera el límite de 8 MB. Elige una imagen más pequeña.", 413
 
 @app.route("/health")
 def health():
