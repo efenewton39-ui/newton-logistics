@@ -4,7 +4,7 @@ from functools import wraps
 from flask import Flask, request, redirect, url_for, render_template_string, session, flash, abort
 
 APP_SECRET = os.environ.get("APP_SECRET", "change-this-before-public-launch")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-me-now")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Bless@2008")
 DB_PATH = os.environ.get("DB_PATH", "shipments.db")
 
 app = Flask(__name__)
