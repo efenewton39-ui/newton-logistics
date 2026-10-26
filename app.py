@@ -1,3 +1,4 @@
+
 import os, secrets, string, sqlite3
 from datetime import datetime, timezone
 from functools import wraps
@@ -59,9 +60,10 @@ footer{text-align:center;color:var(--muted);padding:30px 15px;font-size:13px}
 a{color:#1d5eea}.actions{display:flex;gap:8px;flex-wrap:wrap}
 @media(max-width:580px){form.search{flex-direction:column}.panel{padding:18px}header{padding:18px}nav a{margin-left:8px}}
 """
-BASE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title }} | Newton Logistics</title><style>""" + STYLE + """</style></head><body>
-<header><div class="brand">NEWTON <span>LOGISTICS</span></div><nav><a href="{{ url_for('index') }}">Track package</a>{% if session.get('admin') %}<a href="{{ url_for('admin') }}">Dashboard</a><a href="{{ url_for('logout') }}">Log out</a>{% else %}<a href="{{ url_for('login') }}">Admin</a>{% endif %}</nav></header>
-<main>{% with messages=get_flashed_messages() %}{% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}{{ content|safe }}</main><footer>Newton Logistics · Tracking information reflects the latest recorded update. This website is not affiliated with another courier unless explicitly stated.</footer></body></html>"""
+
+BASE = """<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title }} | Newton Logistics</title><style>""" + STYLE + """</style></head><body>
+<header><div class="brand">NEWTON <span>LOGISTICS</span></div><nav><a href="{{ url_for('index') }}">Seguimiento</a>{% if session.get('admin') %}<a href="{{ url_for('admin') }}">Panel de administración</a><a href="{{ url_for('logout') }}">Cerrar sesión</a>{% else %}<a href="{{ url_for('login') }}">Administración</a>{% endif %}</nav></header>
+<main>{% with messages=get_flashed_messages() %}{% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}{{ content|safe }}</main><footer>Newton Logistics · La información de seguimiento refleja la última actualización registrada. Este sitio no está afiliado a otra empresa de mensajería, salvo que se indique expresamente.</footer></body></html>"""
 
 def page(title, content, **ctx):
     return render_template_string(BASE, title=title, content=render_template_string(content, **ctx), **ctx)
@@ -76,21 +78,44 @@ def index():
         code = request.form.get("code", "").strip().upper()
         with db() as conn:
             shipment = conn.execute("SELECT * FROM shipments WHERE code=?", (code,)).fetchone()
+
     content = """
-<section class="hero"><h1>Your shipment, in view.</h1><p>Enter your tracking code to view the latest recorded shipment status and location.</p>
-<form class="search" method="post"><input name="code" placeholder="e.g. NWT-AB12CD34" value="{{ code }}" required aria-label="Tracking code"><button>Track shipment</button></form></section>
+<section class="hero">
+<h1>Consulta el estado de tu envío</h1>
+<p>Introduce tu código de seguimiento para consultar el último estado y la ubicación registrada de tu envío.</p>
+<form class="search" method="post">
+<input name="code" placeholder="Ej.: NWT-AB12CD34" value="{{ code }}" required aria-label="Código de seguimiento">
+<button>Consultar envío</button>
+</form>
+</section>
+
 {% if searched %}
 <div class="panel">
 {% if shipment %}
-<div class="muted">TRACKING NUMBER</div><div class="tracking-code">{{ shipment.code }}</div><p><span class="pill">{{ shipment.status }}</span></p>
-<div class="grid"><div><div class="muted">LATEST RECORDED LOCATION</div><strong>{{ shipment.location }}</strong></div><div><div class="muted">DESTINATION</div><strong>{{ shipment.destination }}</strong></div><div><div class="muted">ORIGIN</div><strong>{{ shipment.origin }}</strong></div><div><div class="muted">LAST UPDATED</div><strong>{{ shipment.updated_at }}</strong></div></div>
+<div class="muted">NÚMERO DE SEGUIMIENTO</div>
+<div class="tracking-code">{{ shipment.code }}</div>
+<p><span class="pill">{% if shipment.status == "Processing" %}En preparación{% elif shipment.status == "In Transit" %}En tránsito{% elif shipment.status == "At Local Facility" %}En el centro de distribución local{% elif shipment.status == "Out for Delivery" %}En camino para la entrega{% elif shipment.status == "Delivered" %}Entregado{% elif shipment.status == "On Hold" %}En espera{% else %}{{ shipment.status }}{% endif %}</span></p>
+<div class="grid">
+<div><div class="muted">ÚLTIMA UBICACIÓN REGISTRADA</div><strong>{{ shipment.location }}</strong></div>
+<div><div class="muted">DESTINO</div><strong>{{ shipment.destination }}</strong></div>
+<div><div class="muted">ORIGEN</div><strong>{{ shipment.origin }}</strong></div>
+<div><div class="muted">ÚLTIMA ACTUALIZACIÓN</div><strong>{{ shipment.updated_at }}</strong></div>
+</div>
 {% if shipment.details %}<p>{{ shipment.details }}</p>{% endif %}
-<p class="muted">This shows the latest information recorded by the shipping service; it is not live GPS tracking.</p>
-{% else %}<h2>Tracking code not found</h2><p>Please check the code and try again, or contact the sender.</p>{% endif %}
-</div>{% endif %}
-<div class="panel"><h2>How tracking works</h2><p class="muted">Each valid code links to a shipment record. Status and location appear here after the administrator records an update.</p></div>
+<p class="muted">Esta información refleja la última actualización registrada. No se trata de un seguimiento GPS en tiempo real.</p>
+{% else %}
+<h2>No se encontró el código de seguimiento</h2>
+<p>Comprueba el código e inténtalo de nuevo o ponte en contacto con la persona que te envió el paquete.</p>
+{% endif %}
+</div>
+{% endif %}
+
+<div class="panel">
+<h2>¿Cómo funciona el seguimiento?</h2>
+<p class="muted">Cada código válido corresponde a un registro de envío. El estado y la ubicación se muestran aquí cuando se registra una actualización.</p>
+</div>
 """
-    return page("Track a package", content, shipment=shipment, searched=searched, code=code)
+    return page("Seguimiento de envíos", content, shipment=shipment, searched=searched, code=code)
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -98,10 +123,10 @@ def login():
         if secrets.compare_digest(request.form.get("password", ""), ADMIN_PASSWORD):
             session["admin"] = True
             return redirect(url_for("admin"))
-        flash("Incorrect password.")
-    return page("Admin login", """
-<div class="panel" style="max-width:480px;margin:0 auto"><h1 style="font-size:28px">Admin sign in</h1><p class="muted">Private shipment management</p>
-<form method="post"><div class="field"><label>Admin password</label><input type="password" name="password" required autocomplete="current-password"></div><button>Sign in</button></form></div>
+        flash("Contraseña incorrecta.")
+    return page("Acceso de administración", """
+<div class="panel" style="max-width:480px;margin:0 auto"><h1 style="font-size:28px">Iniciar sesión</h1><p class="muted">Gestión privada de envíos</p>
+<form method="post"><div class="field"><label>Contraseña de administrador</label><input type="password" name="password" required autocomplete="current-password"></div><button>Entrar</button></form></div>
 """)
 
 @app.route("/logout")
@@ -131,35 +156,37 @@ def admin():
         code = request.form.get("code", "").strip().upper() or new_code()
         allowed = ["Processing", "In Transit", "At Local Facility", "Out for Delivery", "Delivered", "On Hold"]
         if not all([recipient, origin, destination, location]) or status not in allowed:
-            flash("Fill in all required fields and choose a valid status.")
+            flash("Completa todos los campos obligatorios y selecciona un estado válido.")
         else:
             try:
                 with db() as conn:
                     conn.execute("INSERT INTO shipments(code,recipient,origin,destination,status,location,details,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                         (code, recipient, origin, destination, status, location, details, now()))
-                flash("Shipment created. Tracking code: " + code)
+                flash("Envío creado. Código de seguimiento: " + code)
                 return redirect(url_for("admin"))
             except sqlite3.IntegrityError:
-                flash("That tracking code already exists. Choose another one.")
+                flash("Ese código de seguimiento ya existe. Elige otro.")
+
     with db() as conn:
         shipments = conn.execute("SELECT * FROM shipments ORDER BY id DESC").fetchall()
-    return page("Admin dashboard", """
-<div class="panel"><h1 style="font-size:30px">Shipment dashboard</h1><p class="muted">Create a shipment record and share its tracking code with the customer.</p>
+
+    return page("Panel de administración", """
+<div class="panel"><h1 style="font-size:30px">Panel de envíos</h1><p class="muted">Crea un registro de envío y comparte su código de seguimiento con el cliente.</p>
 <form method="post">
 <div class="grid">
-<div class="field"><label>Recipient / reference *</label><input name="recipient" required></div>
-<div class="field"><label>Tracking code (optional)</label><input name="code" placeholder="Leave blank to generate one"></div>
-<div class="field"><label>Origin *</label><input name="origin" placeholder="City or dispatch location" required></div>
-<div class="field"><label>Destination *</label><input name="destination" placeholder="Destination city / facility" required></div>
-<div class="field"><label>Current recorded location *</label><input name="location" placeholder="Where the package was last confirmed" required></div>
-<div class="field"><label>Status *</label><select name="status">{% for s in statuses %}<option>{{ s }}</option>{% endfor %}</select></div>
+<div class="field"><label>Destinatario / referencia *</label><input name="recipient" required></div>
+<div class="field"><label>Código de seguimiento (opcional)</label><input name="code" placeholder="Déjalo vacío para generar uno"></div>
+<div class="field"><label>Origen *</label><input name="origin" placeholder="Ciudad o lugar de despacho" required></div>
+<div class="field"><label>Destino *</label><input name="destination" placeholder="Ciudad o centro de destino" required></div>
+<div class="field"><label>Última ubicación confirmada *</label><input name="location" placeholder="Último lugar donde se confirmó el paquete" required></div>
+<div class="field"><label>Estado *</label><select name="status">{% for s in statuses %}<option value="{{ s }}">{% if s == "Processing" %}En preparación{% elif s == "In Transit" %}En tránsito{% elif s == "At Local Facility" %}En el centro de distribución local{% elif s == "Out for Delivery" %}En camino para la entrega{% elif s == "Delivered" %}Entregado{% elif s == "On Hold" %}En espera{% else %}{{ s }}{% endif %}</option>{% endfor %}</select></div>
 </div>
-<div class="field"><label>Shipment update / notes</label><textarea name="details" placeholder="Optional note based on confirmed information"></textarea></div><button>Create shipment</button>
+<div class="field"><label>Actualización del envío / notas</label><textarea name="details" placeholder="Nota opcional basada en información confirmada"></textarea></div><button>Crear envío</button>
 </form></div>
-<div class="panel"><h2>Saved shipments ({{ shipments|length }})</h2>
-{% if shipments %}<div style="overflow-x:auto"><table><thead><tr><th>Code</th><th>Destination</th><th>Status</th><th>Location</th><th>Updated</th><th></th></tr></thead><tbody>
-{% for s in shipments %}<tr><td><strong>{{ s.code }}</strong></td><td>{{ s.destination }}</td><td>{{ s.status }}</td><td>{{ s.location }}</td><td>{{ s.updated_at }}</td><td><a href="{{ url_for('edit', code=s.code) }}">Edit</a></td></tr>{% endfor %}
-</tbody></table></div>{% else %}<p class="muted">No shipments yet. Create the first one above.</p>{% endif %}</div>
+<div class="panel"><h2>Envíos guardados ({{ shipments|length }})</h2>
+{% if shipments %}<div style="overflow-x:auto"><table><thead><tr><th>Código</th><th>Destino</th><th>Estado</th><th>Ubicación</th><th>Actualizado</th><th></th></tr></thead><tbody>
+{% for s in shipments %}<tr><td><strong>{{ s.code }}</strong></td><td>{{ s.destination }}</td><td>{% if s.status == "Processing" %}En preparación{% elif s.status == "In Transit" %}En tránsito{% elif s.status == "At Local Facility" %}En el centro de distribución local{% elif s.status == "Out for Delivery" %}En camino para la entrega{% elif s.status == "Delivered" %}Entregado{% elif s.status == "On Hold" %}En espera{% else %}{{ s.status }}{% endif %}</td><td>{{ s.location }}</td><td>{{ s.updated_at }}</td><td><a href="{{ url_for('edit', code=s.code) }}">Editar</a></td></tr>{% endfor %}
+</tbody></table></div>{% else %}<p class="muted">Todavía no hay envíos. Crea el primero arriba.</p>{% endif %}</div>
 """, shipments=shipments, statuses=["Processing","In Transit","At Local Facility","Out for Delivery","Delivered","On Hold"])
 
 @app.route("/admin/edit/<code>", methods=["GET", "POST"])
@@ -169,25 +196,28 @@ def edit(code):
         shipment = conn.execute("SELECT * FROM shipments WHERE code=?", (code.upper(),)).fetchone()
     if not shipment:
         abort(404)
+
     statuses = ["Processing","In Transit","At Local Facility","Out for Delivery","Delivered","On Hold"]
+
     if request.method == "POST":
         status = request.form.get("status", "Processing")
         location = request.form.get("location", "").strip()
         details = request.form.get("details", "").strip()
         if status not in statuses or not location:
-            flash("Enter a location and valid status.")
+            flash("Introduce una ubicación y selecciona un estado válido.")
         else:
             with db() as conn:
                 conn.execute("UPDATE shipments SET status=?,location=?,details=?,updated_at=? WHERE code=?",
                              (status, location, details, now(), code.upper()))
-            flash("Shipment updated.")
+            flash("Envío actualizado.")
             return redirect(url_for("admin"))
-    return page("Update shipment", """
-<div class="panel"><h1 style="font-size:28px">Update {{ shipment.code }}</h1><p>Destination: <strong>{{ shipment.destination }}</strong></p>
-<form method="post"><div class="field"><label>Status</label><select name="status">{% for s in statuses %}<option {% if s==shipment.status %}selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
-<div class="field"><label>Latest confirmed location</label><input name="location" value="{{ shipment.location }}" required></div>
-<div class="field"><label>Update notes</label><textarea name="details">{{ shipment.details }}</textarea></div><div class="actions"><button>Save update</button><a class="btn" style="background:#64748b" href="{{ url_for('admin') }}">Cancel</a></div></form>
-<p class="muted">Only enter a location/status supported by actual shipment information.</p></div>
+
+    return page("Actualizar envío", """
+<div class="panel"><h1 style="font-size:28px">Actualizar {{ shipment.code }}</h1><p>Destino: <strong>{{ shipment.destination }}</strong></p>
+<form method="post"><div class="field"><label>Estado</label><select name="status">{% for s in statuses %}<option value="{{ s }}" {% if s==shipment.status %}selected{% endif %}>{% if s == "Processing" %}En preparación{% elif s == "In Transit" %}En tránsito{% elif s == "At Local Facility" %}En el centro de distribución local{% elif s == "Out for Delivery" %}En camino para la entrega{% elif s == "Delivered" %}Entregado{% elif s == "On Hold" %}En espera{% else %}{{ s }}{% endif %}</option>{% endfor %}</select></div>
+<div class="field"><label>Última ubicación confirmada</label><input name="location" value="{{ shipment.location }}" required></div>
+<div class="field"><label>Notas de actualización</label><textarea name="details">{{ shipment.details }}</textarea></div><div class="actions"><button>Guardar actualización</button><a class="btn" style="background:#64748b" href="{{ url_for('admin') }}">Cancelar</a></div></form>
+<p class="muted">Introduce únicamente una ubicación y un estado respaldados por información real del envío.</p></div>
 """, shipment=shipment, statuses=statuses)
 
 @app.route("/health")
@@ -195,5 +225,6 @@ def health():
     return {"status": "ok"}
 
 init_db()
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=False)
